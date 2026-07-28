@@ -1,0 +1,317 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+    <title>Hand Game Online - Hands Version</title>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js" crossorigin="anonymous"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js" crossorigin="anonymous"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/drawing_utils/drawing_utils.js" crossorigin="anonymous"></script>
+    <style>
+        body { margin: 0; background-color: #000; color: white; display: flex; justify-content: center; align-items: center; height: 100vh; overflow: hidden; font-family: sans-serif; touch-action: none; }
+        #container { position: relative; width: 100vw; height: 100vh; }
+        canvas { position: absolute; top: 0; left: 0; width: 100%; height: 100%; object-fit: cover; }
+        video { display: none; }
+
+        #audio-init { 
+            position: fixed; top: 0; left: 0; width: 100%; height: 100%; 
+            background: rgba(0,0,0,0.9); display: flex; align-items: center; justify-content: center; 
+            z-index: 100; cursor: pointer; text-align: center;
+        }
+        #audio-init p { font-size: 24px; color: #fff; border: 2px solid #fff; padding: 20px; border-radius: 10px; }
+    </style>
+</head>
+<body>
+
+<div id="audio-init">
+    <p>画面をタップして開始<br>(音声を有効にします)</p>
+</div>
+
+<div id="container">
+    <video id="input_video" playsinline muted></video>
+    <canvas id="output_canvas"></canvas>
+</div>
+
+<script>
+    const videoElement = document.getElementById('input_video');
+    const canvasElement = document.getElementById('output_canvas');
+    const canvasCtx = canvasElement.getContext('2d');
+    const audioInit = document.getElementById('audio-init');
+
+    let score = 0;
+    let gameStarted = false;
+    let cameraReady = false; 
+    let startTime = 0;
+    let nextStartEnabledTime = 0;
+    const gameDuration = 40;
+    
+    let circleRadius = 46;
+    let fontSizeInsideCircle = 44;    
+
+    let circles = [];
+    let targetCount = 1;
+    let audioEnabled = false;
+
+    let uiBoxWidth = 250;
+    let uiBoxHeight = 70;
+    let uiMargin = 10;
+
+    let audioCtx = null;
+
+    audioInit.addEventListener('click', () => {
+        audioEnabled = true;
+        audioInit.style.display = 'none';
+        if (!audioCtx) {
+            audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+        }
+        if (audioCtx.state === 'suspended') {
+            audioCtx.resume();
+        }
+        speak(""); 
+        playBeep(true);
+    });
+
+    function speak(text) {
+        if (!audioEnabled) return;
+        window.speechSynthesis.cancel();
+        const utter = new SpeechSynthesisUtterance(text);
+        utter.lang = 'ja-JP';
+        window.speechSynthesis.speak(utter);
+    }
+
+    function playBeep(silent = false) {
+        if (!audioEnabled || !audioCtx) return;
+        if (audioCtx.state === 'suspended') audioCtx.resume();
+        const oscillator = audioCtx.createOscillator();
+        const gainNode = audioCtx.createGain();
+        oscillator.connect(gainNode);
+        gainNode.connect(audioCtx.destination);
+        oscillator.type = 'sine';
+        oscillator.frequency.setValueAtTime(900, audioCtx.currentTime);
+        const now = audioCtx.currentTime;
+        const duration = silent ? 0.01 : 0.1;
+        oscillator.start(now);
+        gainNode.gain.setValueAtTime(silent ? 0 : 1, now);
+        gainNode.gain.exponentialRampToValueAtTime(0.00001, now + duration);
+        oscillator.stop(now + duration);
+    }
+
+    function updateCanvasSize() {
+        canvasElement.width = window.innerWidth;
+        canvasElement.height = window.innerHeight;
+        const minDim = Math.min(canvasElement.width, canvasElement.height);
+        circleRadius = minDim * 0.08;
+        fontSizeInsideCircle = Math.floor(circleRadius * 1.2);
+        uiBoxWidth = canvasElement.width * 0.25;
+        uiBoxHeight = canvasElement.height * 0.1;
+        if (uiBoxWidth > 200) uiBoxWidth = 200;
+        if (uiBoxHeight > 60) uiBoxHeight = 60;
+    }
+    window.addEventListener('resize', updateCanvasSize);
+    updateCanvasSize();
+
+    function generateCircles() {
+        circles = [];
+        targetCount = 1;
+        const randomOrder = Array.from({length: 10}, (_, i) => i + 1).sort(() => Math.random() - 0.5);
+        const sideMargin = 3*circleRadius; 
+        const playableWidth = canvasElement.width - (sideMargin * 2);
+        const partWidth = playableWidth / 10; 
+        const topBoundary = uiBoxHeight + uiMargin + circleRadius + 20;
+        const bottomBoundary = canvasElement.height * 0.75; 
+        const availableHeight = bottomBoundary - topBoundary;
+
+        for (let i = 0; i < 10; i++) {
+            let x, y;
+            let isValid = false;
+            let attempts = 0;
+            while (!isValid && attempts < 100) {
+                const minX = sideMargin + (partWidth * i);
+                const maxX = sideMargin + (partWidth * (i + 1));
+                x = Math.random() * (maxX - minX) + minX;
+                y = Math.random() * availableHeight + topBoundary;
+                let overlaps = false;
+                for (let other of circles) {
+                    const dist = Math.sqrt((x - other.x) ** 2 + (y - other.y) ** 2);
+                    if (dist < circleRadius * 2.2) { overlaps = true; break; }
+                }
+                const inScoreArea = (x < uiBoxWidth + sideMargin && y < uiBoxHeight + uiMargin + circleRadius);
+                const inTimerArea = (x > canvasElement.width - uiBoxWidth - sideMargin && y < uiBoxHeight + uiMargin + circleRadius);
+                if (!overlaps && !inScoreArea && !inTimerArea) isValid = true;
+                attempts++;
+            }
+            circles.push({ x: x, y: y, value: randomOrder[i], hit: false });
+        }
+    }
+
+    function checkCollision(hx, hy, cx, cy) {
+        const dist = Math.sqrt((hx - cx) ** 2 + (hy - cy) ** 2);
+        return dist < circleRadius + (circleRadius * 0.8);
+    }
+
+    function onResults(results) {
+        cameraReady = true; 
+        const currentTime = Date.now();
+
+        canvasCtx.save();
+        canvasCtx.clearRect(0, 0, canvasElement.width, canvasElement.height);
+        canvasCtx.translate(canvasElement.width, 0);
+        canvasCtx.scale(-1, 1);
+        canvasCtx.drawImage(results.image, 0, 0, canvasElement.width, canvasElement.height);
+
+        let timeLeft = 0;
+        if (gameStarted) {
+            timeLeft = Math.max(0, gameDuration - Math.floor((currentTime - startTime) / 1000));
+            if (timeLeft <= 0) {
+                gameStarted = false;
+                nextStartEnabledTime = currentTime + 3000;
+                speak(score + "点です。終了。");
+            }
+        }
+
+        let handsPositions = [];
+        let isHandRaised = false;
+
+        // Handsモデルによる手の検出
+        if (results.multiHandLandmarks && results.multiHandLandmarks.length > 0) {
+            for (const landmarks of results.multiHandLandmarks) {
+                // 8番: 人差し指の先端 (直感的に的を触りやすいため採用)
+                // ※手のひら中心が良い場合は 9番 (中指の付け根) に変更してください
+                const targetPoint = landmarks[8];
+                
+                handsPositions.push({ 
+                    x: targetPoint.x * canvasElement.width, 
+                    y: targetPoint.y * canvasElement.height 
+                });
+
+                // 手を挙げているかの判定 (y < 0.30 と少し厳しめに設定)
+                if (targetPoint.y < 0.30) {
+                    isHandRaised = true;
+                }
+            }
+
+            // 検出した手の位置に黄色いリングを描画
+            handsPositions.forEach(h => {
+                canvasCtx.beginPath();
+                canvasCtx.arc(h.x, h.y, circleRadius * 0.8, 0, 2 * Math.PI);
+                canvasCtx.strokeStyle = 'yellow';
+                canvasCtx.lineWidth = 6;
+                canvasCtx.stroke();
+            });
+
+            // スタートロジック (キープなし、即スタート)
+            if (!gameStarted && currentTime > nextStartEnabledTime) {
+                if (isHandRaised) {
+                    gameStarted = true;
+                    score = 0;
+                    startTime = Date.now();
+                    generateCircles();
+                    speak("スタート");
+                }
+            }
+        }
+
+        if (gameStarted) {
+            let allHit = true;
+            circles.forEach(c => {
+                if (!c.hit) {
+                    allHit = false;
+                    if (c.value === targetCount) {
+                        handsPositions.forEach(h => {
+                            if (checkCollision(h.x, h.y, c.x, c.y)) {
+                                c.hit = true;
+                                score++;
+                                targetCount++;
+                                playBeep();
+                            }
+                        });
+                    }
+                    canvasCtx.beginPath();
+                    canvasCtx.arc(c.x, c.y, circleRadius, 0, 2 * Math.PI);
+                    canvasCtx.fillStyle = 'red';
+                    canvasCtx.fill();
+                    canvasCtx.save();
+                    canvasCtx.translate(c.x, c.y);
+                    canvasCtx.scale(-1, 1);
+                    canvasCtx.fillStyle = 'lime';
+                    canvasCtx.font = `bold ${fontSizeInsideCircle*1.2}px Arial`;
+                    canvasCtx.textAlign = "center";
+                    canvasCtx.textBaseline = "middle";
+                    canvasCtx.fillText(c.value, 0, 0);
+                    canvasCtx.restore();
+                } else {
+                    canvasCtx.beginPath();
+                    canvasCtx.arc(c.x, c.y, circleRadius, 0, 2 * Math.PI);
+                    canvasCtx.fillStyle = 'rgba(0, 255, 0, 0.5)';
+                    canvasCtx.fill();
+                }
+            });
+            if (allHit) generateCircles();
+        }
+
+        canvasCtx.restore(); 
+
+        // UI表示
+        canvasCtx.fillStyle = "rgba(0, 0, 0, 0.4)";
+        canvasCtx.fillRect(uiMargin, uiMargin, uiBoxWidth, uiBoxHeight);
+        canvasCtx.fillStyle = "lime";
+        canvasCtx.font = `bold ${uiBoxHeight * 0.5}px Arial`;
+        canvasCtx.textAlign = "left";
+        canvasCtx.textBaseline = "middle";
+        canvasCtx.fillText(`Score: ${score}`, uiMargin + 10, uiMargin + (uiBoxHeight / 2));
+        
+        canvasCtx.fillStyle = "rgba(0, 0, 0, 0.4)";
+        canvasCtx.fillRect(canvasElement.width - uiBoxWidth - uiMargin, uiMargin, uiBoxWidth, uiBoxHeight);
+        canvasCtx.fillStyle = "white";
+        canvasCtx.fillText(`Time: ${timeLeft}`, canvasElement.width - uiBoxWidth - uiMargin + 10, uiMargin + (uiBoxHeight / 2));
+
+        if (!gameStarted) {
+            canvasCtx.textAlign = "center";
+            if (currentTime < nextStartEnabledTime) {
+                const waitSec = Math.ceil((nextStartEnabledTime - currentTime) / 1000);
+                canvasCtx.font = "bold 40px Arial";
+                canvasCtx.fillStyle = "orange";
+                canvasCtx.fillText(`Wait... ${waitSec}`, canvasElement.width / 2, canvasElement.height / 2);
+            } else {
+                // スタート待機中の表示
+                canvasCtx.font = "bold 45px Arial";
+                canvasCtx.fillStyle = "red";
+                canvasCtx.fillText("手を上にあげてスタート", canvasElement.width / 2, canvasElement.height / 2 - 40);
+            }
+        }
+    }
+
+    function drawInitialLoading() {
+        if (!cameraReady) {
+            canvasCtx.fillStyle = "black";
+            canvasCtx.fillRect(0, 0, canvasElement.width, canvasElement.height);
+            canvasCtx.fillStyle = "white";
+            canvasCtx.font = "bold 30px Arial";
+            canvasCtx.textAlign = "center";
+            canvasCtx.fillText("カメラ起動中...", canvasElement.width / 2, canvasElement.height / 2);
+            requestAnimationFrame(drawInitialLoading);
+        }
+    }
+    drawInitialLoading();
+
+    // PoseではなくHandsを初期化
+    const hands = new Hands({ locateFile: (file) => `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${file}` });
+    hands.setOptions({ 
+        maxNumHands: 2,               // 認識する手の最大数
+        modelComplexity: 0,           // 0にすることで最軽量・高速化
+        minDetectionConfidence: 0.7,  // 誤検出を防ぐため少し高めに設定
+        minTrackingConfidence: 0.7
+    });
+    hands.onResults(onResults);
+
+    const camera = new Camera(videoElement, {
+        onFrame: async () => { await hands.send({image: videoElement}); },
+        width: 1280, height: 720,
+        facingMode: 'user'
+    });
+    camera.start();
+
+    speak("カメラ起動ちゅう");
+</script>
+</body>
+</html>
